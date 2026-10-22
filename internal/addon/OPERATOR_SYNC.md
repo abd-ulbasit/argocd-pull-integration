@@ -219,6 +219,9 @@ Manually update `_operator-manifests.tpl` in both chart locations to match the n
 
 If the ArgoCD CR schema changed (new fields in `argoCDAgent`, `principal`, `agent`), update:
 - `charts/argocd-agent-addon/templates/argocd-operator/argocd.yaml` (hub/principal)
+- `internal/argocdoperator/v1beta1/types.go`, the Go types for the ArgoCD CR fields this repo
+  sets and reads, copied from the operator's `api/v1beta1`. `TestTypesMatchOperatorCRD` checks
+  them against the CRD files from Step 2, so `make test` fails if a field was renamed or removed.
 - `internal/controller/argocd_cr_manifest_work.go`, `buildDefaultArgoCDCR` (spoke/agent,
   generated in Go and delivered via ManifestWork - there is no spoke-side chart template for it)
 

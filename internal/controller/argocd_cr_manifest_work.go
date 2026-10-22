@@ -32,6 +32,7 @@ import (
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	appsv1alpha1 "open-cluster-management.io/argocd-pull-integration/api/v1alpha1"
+	argocdv1beta1 "open-cluster-management.io/argocd-pull-integration/internal/argocdoperator/v1beta1"
 )
 
 const (
@@ -95,7 +96,7 @@ func (r *GitOpsClusterReconciler) createArgoCDCRManifestWork(
 	} else {
 		// Auto-generate default ArgoCD CR
 		defaultCR := r.buildDefaultArgoCDCR(ctx, gitOpsCluster, spokeArgoCDNamespace, serverAddress, serverPort)
-		crJSON, err := json.Marshal(defaultCR)
+		crJSON, err := marshalArgoCDCR(defaultCR)
 		if err != nil {
 			return fmt.Errorf("failed to marshal default ArgoCD CR: %w", err)
 		}
@@ -177,7 +178,7 @@ func (r *GitOpsClusterReconciler) createArgoCDCRManifestWork(
 func (r *GitOpsClusterReconciler) buildDefaultArgoCDCR(
 	ctx context.Context,
 	gitOpsCluster *appsv1alpha1.GitOpsCluster,
-	spokeArgoCDNamespace, serverAddress, serverPort string) *unstructured.Unstructured {
+	spokeArgoCDNamespace, serverAddress, serverPort string) *argocdv1beta1.ArgoCD {
 
 	mode := gitOpsCluster.Spec.ArgoCDAgentAddon.Mode
 	if mode == "" {
@@ -197,50 +198,48 @@ func (r *GitOpsClusterReconciler) buildDefaultArgoCDCR(
 		}
 	}
 
-	cr := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "argoproj.io/v1beta1",
-			"kind":       "ArgoCD",
-			"metadata": map[string]interface{}{
-				"name":      "argocd",
-				"namespace": spokeArgoCDNamespace,
+	cr := &argocdv1beta1.ArgoCD{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: argocdv1beta1.GroupVersion.String(),
+			Kind:       argocdv1beta1.ArgoCDKind,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd",
+			Namespace: spokeArgoCDNamespace,
+		},
+		Spec: argocdv1beta1.ArgoCDSpec{
+			Server: argocdv1beta1.ArgoCDServerSpec{
+				Enabled: boolPtr(false),
 			},
-			"spec": map[string]interface{}{
-				"server": map[string]interface{}{
-					"enabled": false,
-				},
-				"sourceNamespaces": []interface{}{"*"},
-				"argoCDAgent": map[string]interface{}{
-					"agent": map[string]interface{}{
-						"enabled":           true,
-						"allowedNamespaces": []interface{}{"*"},
-						"creds":             "mtls:open-cluster-management:cluster:([^:]+):addon:argocd-agent",
-						"logLevel":          "info",
-						"logFormat":         "text",
-						"client": map[string]interface{}{
-							"principalServerAddress": serverAddress,
-							"principalServerPort":    serverPort,
-							"mode":                   mode,
-							"enableWebSocket":        false,
-							"enableCompression":      false,
-							"keepAliveInterval":      "50s",
-						},
-						"tls": map[string]interface{}{
-							"secretName":       "argocd-agent-open-cluster-management.io-argocd-agent-addon-client-cert",
-							"rootCASecretName": "argocd-agent-ca",
-							"insecure":         false,
-						},
-						"redis": map[string]interface{}{
-							"serverAddress": "argocd-redis:6379",
-						},
+			SourceNamespaces: []string{"*"},
+			ArgoCDAgent: &argocdv1beta1.ArgoCDAgentSpec{
+				Agent: &argocdv1beta1.AgentSpec{
+					Enabled:           boolPtr(true),
+					AllowedNamespaces: []string{"*"},
+					Creds:             "mtls:open-cluster-management:cluster:([^:]+):addon:argocd-agent",
+					LogLevel:          "info",
+					LogFormat:         "text",
+					// Left out of the CR when empty, so the operator default applies.
+					Image: agentImage,
+					Client: &argocdv1beta1.AgentClientSpec{
+						PrincipalServerAddress: serverAddress,
+						PrincipalServerPort:    serverPort,
+						Mode:                   mode,
+						EnableWebSocket:        boolPtr(false),
+						EnableCompression:      boolPtr(false),
+						KeepAliveInterval:      "50s",
+					},
+					TLS: &argocdv1beta1.AgentTLSSpec{
+						SecretName:       "argocd-agent-open-cluster-management.io-argocd-agent-addon-client-cert",
+						RootCASecretName: "argocd-agent-ca",
+						Insecure:         boolPtr(false),
+					},
+					Redis: &argocdv1beta1.AgentRedisSpec{
+						ServerAddress: "argocd-redis:6379",
 					},
 				},
 			},
 		},
-	}
-
-	if agentImage != "" {
-		_ = unstructured.SetNestedField(cr.Object, agentImage, "spec", "argoCDAgent", "agent", "image")
 	}
 
 	// destination-based mapping routes Applications to agents by spec.destination.name and is
@@ -249,13 +248,25 @@ func (r *GitOpsClusterReconciler) buildDefaultArgoCDCR(
 	// destination-based mapping outright for autonomous agents ("destination-based mapping is
 	// not supported for autonomous agents").
 	if mode != "autonomous" {
-		_ = unstructured.SetNestedMap(cr.Object, map[string]interface{}{
-			"enabled":         true,
-			"createNamespace": true,
-		}, "spec", "argoCDAgent", "agent", "destinationBasedMapping")
+		cr.Spec.ArgoCDAgent.Agent.DestinationBasedMapping = &argocdv1beta1.DestinationBasedMappingSpec{
+			Enabled:         boolPtr(true),
+			CreateNamespace: boolPtr(true),
+		}
 	}
 
 	return cr
+}
+
+// marshalArgoCDCR encodes the ArgoCD CR for a ManifestWork. It goes through an unstructured map
+// so the keys come out sorted, the same bytes the API server returns for the stored manifest.
+// That keeps the update check in createArgoCDCRManifestWork from seeing a change on every
+// reconcile.
+func marshalArgoCDCR(cr *argocdv1beta1.ArgoCD) ([]byte, error) {
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cr)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(obj)
 }
 
 // injectServerEndpoint sets principalServerAddress and principalServerPort on an ArgoCD CR
@@ -272,7 +283,7 @@ func injectServerEndpoint(raw []byte, serverAddress, serverPort string) ([]byte,
 		return raw, err
 	}
 
-	if obj.GetAPIVersion() != "argoproj.io/v1beta1" || obj.GetKind() != "ArgoCD" {
+	if obj.GetAPIVersion() != argocdv1beta1.GroupVersion.String() || obj.GetKind() != argocdv1beta1.ArgoCDKind {
 		return raw, nil
 	}
 
@@ -337,7 +348,7 @@ func validateArgoCDCRManifestWork(spec *appsv1alpha1.ArgoCDCRManifestWorkSpec) e
 			return fmt.Errorf("failed to unmarshal manifest at index %d: %w", i, err)
 		}
 
-		if obj.GetAPIVersion() == "argoproj.io/v1beta1" && obj.GetKind() == "ArgoCD" {
+		if obj.GetAPIVersion() == argocdv1beta1.GroupVersion.String() && obj.GetKind() == argocdv1beta1.ArgoCDKind {
 			foundArgoCDCR = true
 		}
 	}

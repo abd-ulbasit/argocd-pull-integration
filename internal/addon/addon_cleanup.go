@@ -30,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	argocdv1beta1 "open-cluster-management.io/argocd-pull-integration/internal/argocdoperator/v1beta1"
 )
 
 const (
@@ -72,8 +74,7 @@ func uninstallArgoCDAgentInternal(ctx context.Context, c client.Client) error {
 	// The operator will handle the cleanup of ArgoCD resources
 	klog.Info("Step 1: Deleting ArgoCD CR from namespace: " + argoCDNamespace)
 	argoCD := &unstructured.Unstructured{}
-	argoCD.SetAPIVersion("argoproj.io/v1beta1")
-	argoCD.SetKind("ArgoCD")
+	argoCD.SetGroupVersionKind(argocdv1beta1.GroupVersion.WithKind(argocdv1beta1.ArgoCDKind))
 	argoCDKey := types.NamespacedName{
 		Name:      "argocd",
 		Namespace: argoCDNamespace,
@@ -306,8 +307,7 @@ func waitAndVerifyCleanup(ctx context.Context, c client.Client, waitDuration tim
 
 		// Check if ArgoCD CR has been recreated
 		argoCD := &unstructured.Unstructured{}
-		argoCD.SetAPIVersion("argoproj.io/v1beta1")
-		argoCD.SetKind("ArgoCD")
+		argoCD.SetGroupVersionKind(argocdv1beta1.GroupVersion.WithKind(argocdv1beta1.ArgoCDKind))
 		argoCDKey := types.NamespacedName{
 			Name:      "argocd",
 			Namespace: argoCDNamespace,
@@ -338,8 +338,7 @@ func waitAndVerifyCleanup(ctx context.Context, c client.Client, waitDuration tim
 
 	// Final check - verify everything is still clean
 	argoCD := &unstructured.Unstructured{}
-	argoCD.SetAPIVersion("argoproj.io/v1beta1")
-	argoCD.SetKind("ArgoCD")
+	argoCD.SetGroupVersionKind(argocdv1beta1.GroupVersion.WithKind(argocdv1beta1.ArgoCDKind))
 	argoCDKey := types.NamespacedName{
 		Name:      "argocd",
 		Namespace: argoCDNamespace,

@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -311,48 +312,40 @@ func TestBuildDefaultArgoCDCR(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cr := r.buildDefaultArgoCDCR(context.Background(), tt.gitOpsCluster, tt.spokeArgoCDNamespace, tt.serverAddress, tt.serverPort)
 
-			if cr.GetAPIVersion() != "argoproj.io/v1beta1" {
-				t.Errorf("Expected apiVersion argoproj.io/v1beta1, got %s", cr.GetAPIVersion())
+			if cr.APIVersion != "argoproj.io/v1beta1" {
+				t.Errorf("Expected apiVersion argoproj.io/v1beta1, got %s", cr.APIVersion)
 			}
-			if cr.GetKind() != "ArgoCD" {
-				t.Errorf("Expected kind ArgoCD, got %s", cr.GetKind())
+			if cr.Kind != "ArgoCD" {
+				t.Errorf("Expected kind ArgoCD, got %s", cr.Kind)
 			}
-			if cr.GetNamespace() != tt.wantNamespace {
-				t.Errorf("Expected namespace %s, got %s", tt.wantNamespace, cr.GetNamespace())
+			if cr.Namespace != tt.wantNamespace {
+				t.Errorf("Expected namespace %s, got %s", tt.wantNamespace, cr.Namespace)
 			}
-			if cr.GetName() != "argocd" {
-				t.Errorf("Expected name argocd, got %s", cr.GetName())
+			if cr.Name != "argocd" {
+				t.Errorf("Expected name argocd, got %s", cr.Name)
 			}
 
 			// Verify agent config
-			spec, ok := cr.Object["spec"].(map[string]interface{})
-			if !ok {
-				t.Fatal("spec is not a map")
+			if cr.Spec.ArgoCDAgent == nil || cr.Spec.ArgoCDAgent.Agent == nil {
+				t.Fatal("spec.argoCDAgent.agent is not set")
 			}
-			argoCDAgent, ok := spec["argoCDAgent"].(map[string]interface{})
-			if !ok {
-				t.Fatal("argoCDAgent is not a map")
-			}
-			agent, ok := argoCDAgent["agent"].(map[string]interface{})
-			if !ok {
-				t.Fatal("agent is not a map")
-			}
-			client, ok := agent["client"].(map[string]interface{})
-			if !ok {
-				t.Fatal("client is not a map")
+			agent := cr.Spec.ArgoCDAgent.Agent
+			client := agent.Client
+			if client == nil {
+				t.Fatal("spec.argoCDAgent.agent.client is not set")
 			}
 
-			if client["principalServerAddress"] != tt.serverAddress {
-				t.Errorf("Expected serverAddress %s, got %v", tt.serverAddress, client["principalServerAddress"])
+			if client.PrincipalServerAddress != tt.serverAddress {
+				t.Errorf("Expected serverAddress %s, got %v", tt.serverAddress, client.PrincipalServerAddress)
 			}
-			if client["principalServerPort"] != tt.serverPort {
-				t.Errorf("Expected serverPort %s, got %v", tt.serverPort, client["principalServerPort"])
+			if client.PrincipalServerPort != tt.serverPort {
+				t.Errorf("Expected serverPort %s, got %v", tt.serverPort, client.PrincipalServerPort)
 			}
-			if client["mode"] != tt.wantMode {
-				t.Errorf("Expected mode %s, got %v", tt.wantMode, client["mode"])
+			if client.Mode != tt.wantMode {
+				t.Errorf("Expected mode %s, got %v", tt.wantMode, client.Mode)
 			}
 
-			_, hasDestinationBasedMapping := agent["destinationBasedMapping"]
+			hasDestinationBasedMapping := agent.DestinationBasedMapping != nil
 			if tt.wantMode == "autonomous" && hasDestinationBasedMapping {
 				t.Errorf("destinationBasedMapping must not be set for autonomous agents (argocd-agent rejects it)")
 			}
@@ -431,20 +424,20 @@ func TestBuildDefaultArgoCDCRAgentImageSync(t *testing.T) {
 
 			cr := r.buildDefaultArgoCDCR(context.Background(), gitOpsCluster, "argocd", "10.0.0.1", "443")
 
-			image, found, err := unstructured.NestedString(cr.Object, "spec", "argoCDAgent", "agent", "image")
-			if err != nil {
-				t.Fatalf("unexpected error reading agent image: %v", err)
+			if cr.Spec.ArgoCDAgent == nil || cr.Spec.ArgoCDAgent.Agent == nil {
+				t.Fatal("spec.argoCDAgent.agent is not set")
 			}
+			image := cr.Spec.ArgoCDAgent.Agent.Image
 
 			if tt.wantImageUnset {
-				if found {
+				if image != "" {
 					t.Errorf("Expected spec.argoCDAgent.agent.image to be unset, got %q", image)
 				}
 				return
 			}
 
-			if !found || image != tt.wantImage {
-				t.Errorf("Expected spec.argoCDAgent.agent.image %q, got %q (found=%v)", tt.wantImage, image, found)
+			if image != tt.wantImage {
+				t.Errorf("Expected spec.argoCDAgent.agent.image %q, got %q", tt.wantImage, image)
 			}
 		})
 	}
@@ -572,6 +565,200 @@ func TestCreateArgoCDCRManifestWork(t *testing.T) {
 				if err == nil {
 					t.Error("Expected no ManifestWork to be created for local-cluster")
 				}
+			}
+		})
+	}
+}
+
+// TestCreateArgoCDCRManifestWorkDefaultCRBytes pins the exact bytes of the default ArgoCD CR in
+// the ManifestWork. The keys must stay sorted, as the API server returns the stored manifest,
+// or the update check in createArgoCDCRManifestWork sees a change on every reconcile.
+func TestCreateArgoCDCRManifestWorkDefaultCRBytes(t *testing.T) {
+	s := runtime.NewScheme()
+	_ = scheme.AddToScheme(s)
+	_ = appsv1alpha1.AddToScheme(s)
+	_ = clusterv1.Install(s)
+	_ = workv1.Install(s)
+
+	const hubNamespace = "gitops"
+	hubArgoCD := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "argoproj.io/v1beta1",
+			"kind":       "ArgoCD",
+			"metadata": map[string]interface{}{
+				"name":      "argocd",
+				"namespace": hubNamespace,
+			},
+			"spec": map[string]interface{}{
+				"argoCDAgent": map[string]interface{}{
+					"principal": map[string]interface{}{
+						"image": "quay.io/argoprojlabs/argocd-agent:v0.9.0",
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		addonSpec     appsv1alpha1.ArgoCDAgentAddonSpec
+		withHubArgoCD bool
+		serverAddress string
+		serverPort    string
+		want          string
+	}{
+		{
+			name:          "managed mode with the hub principal image",
+			withHubArgoCD: true,
+			serverAddress: "10.0.0.1",
+			serverPort:    "443",
+			want: `{
+	"apiVersion": "argoproj.io/v1beta1",
+	"kind": "ArgoCD",
+	"metadata": {
+		"name": "argocd",
+		"namespace": "argocd"
+	},
+	"spec": {
+		"argoCDAgent": {
+			"agent": {
+				"allowedNamespaces": [
+					"*"
+				],
+				"client": {
+					"enableCompression": false,
+					"enableWebSocket": false,
+					"keepAliveInterval": "50s",
+					"mode": "managed",
+					"principalServerAddress": "10.0.0.1",
+					"principalServerPort": "443"
+				},
+				"creds": "mtls:open-cluster-management:cluster:([^:]+):addon:argocd-agent",
+				"destinationBasedMapping": {
+					"createNamespace": true,
+					"enabled": true
+				},
+				"enabled": true,
+				"image": "quay.io/argoprojlabs/argocd-agent:v0.9.0",
+				"logFormat": "text",
+				"logLevel": "info",
+				"redis": {
+					"serverAddress": "argocd-redis:6379"
+				},
+				"tls": {
+					"insecure": false,
+					"rootCASecretName": "argocd-agent-ca",
+					"secretName": "argocd-agent-open-cluster-management.io-argocd-agent-addon-client-cert"
+				}
+			}
+		},
+		"server": {
+			"enabled": false
+		},
+		"sourceNamespaces": [
+			"*"
+		]
+	}
+}`,
+		},
+		{
+			name: "autonomous mode in a custom namespace without a hub ArgoCD CR",
+			addonSpec: appsv1alpha1.ArgoCDAgentAddonSpec{
+				Mode:           "autonomous",
+				AgentNamespace: "custom-argocd",
+			},
+			serverAddress: "lb.example.com",
+			serverPort:    "8443",
+			want: `{
+	"apiVersion": "argoproj.io/v1beta1",
+	"kind": "ArgoCD",
+	"metadata": {
+		"name": "argocd",
+		"namespace": "custom-argocd"
+	},
+	"spec": {
+		"argoCDAgent": {
+			"agent": {
+				"allowedNamespaces": [
+					"*"
+				],
+				"client": {
+					"enableCompression": false,
+					"enableWebSocket": false,
+					"keepAliveInterval": "50s",
+					"mode": "autonomous",
+					"principalServerAddress": "lb.example.com",
+					"principalServerPort": "8443"
+				},
+				"creds": "mtls:open-cluster-management:cluster:([^:]+):addon:argocd-agent",
+				"enabled": true,
+				"logFormat": "text",
+				"logLevel": "info",
+				"redis": {
+					"serverAddress": "argocd-redis:6379"
+				},
+				"tls": {
+					"insecure": false,
+					"rootCASecretName": "argocd-agent-ca",
+					"secretName": "argocd-agent-open-cluster-management.io-argocd-agent-addon-client-cert"
+				}
+			}
+		},
+		"server": {
+			"enabled": false
+		},
+		"sourceNamespaces": [
+			"*"
+		]
+	}
+}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(s)
+			if tt.withHubArgoCD {
+				builder = builder.WithObjects(hubArgoCD.DeepCopy())
+			}
+			r := &GitOpsClusterReconciler{
+				Client: builder.Build(),
+				Scheme: s,
+			}
+			gitOpsCluster := &appsv1alpha1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "gitops-cluster",
+					Namespace: hubNamespace,
+				},
+				Spec: appsv1alpha1.GitOpsClusterSpec{
+					ArgoCDAgentAddon: tt.addonSpec,
+				},
+			}
+			cluster := &clusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster1"},
+			}
+
+			if err := r.createArgoCDCRManifestWork(context.TODO(), gitOpsCluster, cluster, tt.serverAddress, tt.serverPort); err != nil {
+				t.Fatalf("createArgoCDCRManifestWork() error = %v", err)
+			}
+
+			mw := &workv1.ManifestWork{}
+			if err := r.Get(context.TODO(), types.NamespacedName{
+				Name:      getArgoCDCRManifestWorkName(hubNamespace, "gitops-cluster"),
+				Namespace: cluster.Name,
+			}, mw); err != nil {
+				t.Fatalf("failed to get ManifestWork: %v", err)
+			}
+			if len(mw.Spec.Workload.Manifests) != 1 {
+				t.Fatalf("Expected 1 manifest, got %d", len(mw.Spec.Workload.Manifests))
+			}
+
+			var want bytes.Buffer
+			if err := json.Compact(&want, []byte(tt.want)); err != nil {
+				t.Fatalf("invalid expected JSON: %v", err)
+			}
+			if got := string(mw.Spec.Workload.Manifests[0].Raw); got != want.String() {
+				t.Errorf("default ArgoCD CR mismatch\ngot:  %s\nwant: %s", got, want.String())
 			}
 		})
 	}
