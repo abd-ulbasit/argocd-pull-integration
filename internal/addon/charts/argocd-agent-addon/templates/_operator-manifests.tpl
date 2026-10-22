@@ -242,6 +242,24 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  name: argocd-operator-metrics-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
   name: argocd-operator-namespacemanagement-editor-role
 rules:
 - apiGroups:
@@ -284,24 +302,6 @@ rules:
   - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: argocd-operator-proxy-role
-rules:
-- apiGroups:
-  - authentication.k8s.io
-  resources:
-  - tokenreviews
-  verbs:
-  - create
-- apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: argocd-operator-leader-election-rolebinding
@@ -331,11 +331,11 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: argocd-operator-proxy-rolebinding
+  name: argocd-operator-metrics-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: argocd-operator-proxy-role
+  name: argocd-operator-metrics-role
 subjects:
 - kind: ServiceAccount
   name: argocd-operator-controller-manager
@@ -371,7 +371,7 @@ spec:
   ports:
   - name: https
     port: 8443
-    targetPort: 8080
+    targetPort: 8443
   selector:
     control-plane: argocd-operator
 ---
@@ -413,6 +413,9 @@ spec:
       {{- end }}
       containers:
       - args:
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8443
+        - --metrics-secure
         - --leader-elect
         command:
         - /manager
@@ -436,6 +439,9 @@ spec:
         ports:
         - containerPort: 9443
           name: webhook-server
+          protocol: TCP
+        - containerPort: 8443
+          name: https
           protocol: TCP
         readinessProbe:
           httpGet:

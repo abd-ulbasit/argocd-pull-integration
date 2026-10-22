@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -239,6 +240,75 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 						tt.gitOpsCluster.Spec.ArgoCDAgentAddon.PrincipalServerPort,
 						tt.expectedPort)
 				}
+			}
+		})
+	}
+}
+
+// TestDiscoverPrincipalImage checks that only spec.argoCDAgent.principal is decoded. The hub
+// ArgoCD CR can come from a different operator install (hubArgoCD.enabled: false), so a field
+// elsewhere in the CR that does not match the pinned Go types must not hide the principal image.
+func TestDiscoverPrincipalImage(t *testing.T) {
+	const principalImage = "quay.io/argoprojlabs/argocd-agent:v0.9.0"
+
+	tests := []struct {
+		name      string
+		spec      map[string]interface{}
+		wantImage string
+		wantErr   bool
+	}{
+		{
+			name: "principal image set",
+			spec: map[string]interface{}{
+				"argoCDAgent": map[string]interface{}{
+					"principal": map[string]interface{}{"image": principalImage},
+				},
+			},
+			wantImage: principalImage,
+		},
+		{
+			name: "field outside the principal with a type the Go types do not expect",
+			spec: map[string]interface{}{
+				"sourceNamespaces": "*",
+				"argoCDAgent": map[string]interface{}{
+					"principal": map[string]interface{}{"image": principalImage},
+				},
+			},
+			wantImage: principalImage,
+		},
+		{
+			name: "no principal",
+			spec: map[string]interface{}{"sourceNamespaces": []interface{}{"*"}},
+		},
+		{
+			name: "principal image is not a string",
+			spec: map[string]interface{}{
+				"argoCDAgent": map[string]interface{}{
+					"principal": map[string]interface{}{"image": int64(1)},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hubArgoCD := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "argoproj.io/v1beta1",
+				"kind":       "ArgoCD",
+				"metadata":   map[string]interface{}{"name": "argocd", "namespace": "argocd"},
+				"spec":       tt.spec,
+			}}
+			r := &GitOpsClusterReconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(hubArgoCD).Build(),
+			}
+
+			image, err := r.discoverPrincipalImage(context.Background(), "argocd")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("discoverPrincipalImage() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if image != tt.wantImage {
+				t.Errorf("discoverPrincipalImage() = %q, want %q", image, tt.wantImage)
 			}
 		})
 	}

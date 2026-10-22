@@ -2,7 +2,7 @@
 FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
-ARG ARGOCD_OPERATOR_IMAGE=quay.io/argoprojlabs/argocd-operator:v0.18.0
+ARG ARGOCD_OPERATOR_IMAGE=quay.io/argoprojlabs/argocd-operator:v0.19.0
 
 WORKDIR /workspace
 # Copy the Go Modules manifests

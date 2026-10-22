@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"time"
 
+	argocdv1beta1 "github.com/argoproj-labs/argocd-operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,10 @@ const (
 	// PauseMarkerName is the name of the ConfigMap used to pause the addon controller
 	PauseMarkerName = "argocd-agent-addon-pause"
 )
+
+// argoCDGVK is the GroupVersionKind of the argocd-operator ArgoCD CR. The operator's API package
+// has no constant for the kind.
+var argoCDGVK = argocdv1beta1.GroupVersion.WithKind("ArgoCD")
 
 // uninstallArgoCDAgent uninstalls the ArgoCD agent addon in reverse order
 // Does NOT delete namespaces, only deletes operator after ArgoCD CR is gone
@@ -72,8 +77,7 @@ func uninstallArgoCDAgentInternal(ctx context.Context, c client.Client) error {
 	// The operator will handle the cleanup of ArgoCD resources
 	klog.Info("Step 1: Deleting ArgoCD CR from namespace: " + argoCDNamespace)
 	argoCD := &unstructured.Unstructured{}
-	argoCD.SetAPIVersion("argoproj.io/v1beta1")
-	argoCD.SetKind("ArgoCD")
+	argoCD.SetGroupVersionKind(argoCDGVK)
 	argoCDKey := types.NamespacedName{
 		Name:      "argocd",
 		Namespace: argoCDNamespace,
@@ -306,8 +310,7 @@ func waitAndVerifyCleanup(ctx context.Context, c client.Client, waitDuration tim
 
 		// Check if ArgoCD CR has been recreated
 		argoCD := &unstructured.Unstructured{}
-		argoCD.SetAPIVersion("argoproj.io/v1beta1")
-		argoCD.SetKind("ArgoCD")
+		argoCD.SetGroupVersionKind(argoCDGVK)
 		argoCDKey := types.NamespacedName{
 			Name:      "argocd",
 			Namespace: argoCDNamespace,
@@ -338,8 +341,7 @@ func waitAndVerifyCleanup(ctx context.Context, c client.Client, waitDuration tim
 
 	// Final check - verify everything is still clean
 	argoCD := &unstructured.Unstructured{}
-	argoCD.SetAPIVersion("argoproj.io/v1beta1")
-	argoCD.SetKind("ArgoCD")
+	argoCD.SetGroupVersionKind(argoCDGVK)
 	argoCDKey := types.NamespacedName{
 		Name:      "argocd",
 		Namespace: argoCDNamespace,

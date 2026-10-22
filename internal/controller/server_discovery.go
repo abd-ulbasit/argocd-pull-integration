@@ -21,10 +21,11 @@ import (
 	"fmt"
 	"strconv"
 
+	argocdv1beta1 "github.com/argoproj-labs/argocd-operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
@@ -149,25 +150,30 @@ func (r *GitOpsClusterReconciler) discoverServerAddressAndPort(
 // principal is currently running. An absent CR or unset field is not an error - the caller
 // treats it as "no override available" and falls back to the argocd-operator default.
 func (r *GitOpsClusterReconciler) discoverPrincipalImage(ctx context.Context, argoCDNamespace string) (string, error) {
-	argoCD := &unstructured.Unstructured{}
-	argoCD.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "argoproj.io",
-		Version: "v1beta1",
-		Kind:    "ArgoCD",
-	})
+	// Read as unstructured, which the manager's client reads straight from the API server
+	// instead of starting an informer for ArgoCD CRs.
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(argoCDGVK)
 
-	if err := r.Get(ctx, types.NamespacedName{Name: "argocd", Namespace: argoCDNamespace}, argoCD); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: "argocd", Namespace: argoCDNamespace}, obj); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return "", nil
 		}
 		return "", err
 	}
 
-	image, found, err := unstructured.NestedString(argoCD.Object, "spec", "argoCDAgent", "principal", "image")
+	// Decode only the principal section into the typed spec. The hub CR may come from another
+	// operator install (hubArgoCD.enabled: false), so a field elsewhere in the CR that does not
+	// match the pinned Go types must not stop the agent image from being found.
+	principal, found, err := unstructured.NestedMap(obj.Object, "spec", "argoCDAgent", "principal")
 	if err != nil || !found {
 		return "", err
 	}
-	return image, nil
+	spec := &argocdv1beta1.PrincipalSpec{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(principal, spec); err != nil {
+		return "", err
+	}
+	return spec.Image, nil
 }
 
 // getNodeInternalIP returns the InternalIP of the first node in the cluster

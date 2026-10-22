@@ -7,10 +7,11 @@ replicas: 1
 
 # ArgoCD operator image.
 # Authoritative version lives in Makefile ARGOCD_OPERATOR_IMAGE (injected into
-# the Go binary via ldflags). These Helm defaults MUST match the Makefile value.
+# the Go binary via ldflags). These Helm defaults MUST match the Makefile value
+# ('make verify-operator-version' checks this).
 # The release workflow updates the tag automatically for tagged releases.
 operatorImage: quay.io/argoprojlabs/argocd-operator
-operatorImageTag: v0.18.0
+operatorImageTag: v0.19.0
 
 # Image pull secrets applied to the controller and argocd-operator
 # Deployments, for pulling images from private registries.

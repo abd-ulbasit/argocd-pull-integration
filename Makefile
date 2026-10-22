@@ -1,10 +1,11 @@
 # Image URL to use all building/pushing image targets
 IMG ?= quay.io/open-cluster-management/argocd-pull-integration:latest
 
-# ArgoCD operator image - SINGLE SOURCE OF TRUTH for the operator version.
-# This is injected at build time via ldflags into the Go binary,
+# ArgoCD operator image. This is injected at build time via ldflags into the Go binary,
 # and used to keep the hub Helm chart values in sync.
-ARGOCD_OPERATOR_IMAGE ?= quay.io/argoprojlabs/argocd-operator:v0.18.0
+# It must be the image that the argocd-operator version in go.mod deploys
+# (checked by 'make verify-operator-version').
+ARGOCD_OPERATOR_IMAGE ?= quay.io/argoprojlabs/argocd-operator:v0.19.0
 
 LDFLAGS = -X main.operatorImage=$(ARGOCD_OPERATOR_IMAGE)
 
@@ -93,6 +94,58 @@ verify-crds-chart-sync: ## Verify the standalone CRDs chart matches the hub char
 		>/dev/null 2>&1 \
 		|| { echo "ERROR: CRDs chart is out of sync. Run 'make sync-crds-chart'."; exit 1; }
 
+# The argocd-operator Go module in go.mod sets the operator version this repo ships. Its
+# api/v1beta1 package provides the Go types for the ArgoCD CR, the bundled operator CRDs are
+# generated from its config/crd, and ARGOCD_OPERATOR_IMAGE must be the image its
+# config/manager deploys. Bump the module first, then run 'make sync-operator-crds'.
+ARGOCD_OPERATOR_MODULE = github.com/argoproj-labs/argocd-operator
+ARGOCD_OPERATOR_CRDS = charts/argocd-agent-addon/crds/argocd-operator-crds.yaml \
+	internal/addon/charts/argocd-agent-addon/crds/argocd-operator-crds.yaml
+# Set dir to the operator module's directory in the Go module cache, downloading it if needed,
+# or stop with an error.
+ARGOCD_OPERATOR_DIR = dir="$$(go mod download $(ARGOCD_OPERATOR_MODULE) && go list -m -f '{{.Dir}}' $(ARGOCD_OPERATOR_MODULE))" \
+	&& [ -n "$$dir" ] || { echo "ERROR: cannot download $(ARGOCD_OPERATOR_MODULE) from go.mod."; exit 1; }
+# Build the operator CRDs from $$dir and drop their conversion webhook section, which points at
+# a cert-manager Service that does not exist here. The sed works with GNU and BSD sed.
+ARGOCD_OPERATOR_CRDS_BUILD = $(KUSTOMIZE) build "$$dir/config/crd" \
+	| sed '/^  conversion:$$/,/^  [a-z]/{/^  [a-z]/!d;/^  conversion:$$/d;}'
+
+.PHONY: sync-operator-crds
+sync-operator-crds: kustomize ## Generate the bundled argocd-operator CRDs from the operator version in go.mod
+	@$(ARGOCD_OPERATOR_DIR); \
+	echo "Generating argocd-operator CRDs from $(ARGOCD_OPERATOR_MODULE) $$(go list -m -f '{{.Version}}' $(ARGOCD_OPERATOR_MODULE))..."; \
+	crds="$$(mktemp)"; trap 'rm -f "$$crds"' EXIT; \
+	$(ARGOCD_OPERATOR_CRDS_BUILD) > "$$crds" || exit 1; \
+	for f in $(ARGOCD_OPERATOR_CRDS); do cp "$$crds" $$f; done
+	@$(MAKE) --no-print-directory sync-crds-chart
+
+.PHONY: verify-operator-version
+verify-operator-version: kustomize ## Verify the operator CRDs and image match the argocd-operator version in go.mod
+	@version="$$(go list -m -f '{{.Version}}' $(ARGOCD_OPERATOR_MODULE))"; \
+	$(ARGOCD_OPERATOR_DIR); \
+	image="$(ARGOCD_OPERATOR_IMAGE)"; repo="$${image%:*}"; tag="$${image##*:}"; \
+	want="$$(sed -n 's/^ *newTag: *//p' "$$dir/config/manager/kustomization.yaml")"; \
+	want="$${want:-$$version}"; \
+	rc=0; \
+	if [ "$$tag" != "$$want" ]; then \
+		echo "ERROR: ARGOCD_OPERATOR_IMAGE tag is $$tag, but $(ARGOCD_OPERATOR_MODULE) $$version in go.mod deploys $$want."; rc=1; \
+	fi; \
+	for f in charts/argocd-agent-addon/values.yaml internal/addon/charts/argocd-agent-addon/values.yaml; do \
+		grep -qx "operatorImage: $$repo" $$f && grep -qx "operatorImageTag: $$tag" $$f \
+			|| { echo "ERROR: $$f does not set operatorImage $$repo and operatorImageTag $$tag."; rc=1; }; \
+	done; \
+	grep -qx "ARG ARGOCD_OPERATOR_IMAGE=$$image" Dockerfile \
+		|| { echo "ERROR: Dockerfile ARGOCD_OPERATOR_IMAGE default is not $$image."; rc=1; }; \
+	grep -qx "var operatorImage = \"$$image\"" cmd/main.go \
+		|| { echo "ERROR: cmd/main.go operatorImage default is not $$image."; rc=1; }; \
+	crds="$$(mktemp)"; trap 'rm -f "$$crds"' EXIT; \
+	$(ARGOCD_OPERATOR_CRDS_BUILD) > "$$crds" || exit 1; \
+	for f in $(ARGOCD_OPERATOR_CRDS); do \
+		cmp -s "$$crds" $$f \
+			|| { echo "ERROR: $$f does not match the CRDs of $(ARGOCD_OPERATOR_MODULE) $$version. Run 'make sync-operator-crds'."; rc=1; }; \
+	done; \
+	exit $$rc
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
@@ -102,7 +155,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest verify-operator-chart-sync verify-crds-chart-sync ## Run tests.
+test: manifests generate fmt vet setup-envtest verify-operator-chart-sync verify-crds-chart-sync verify-operator-version ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # E2E Test Configuration

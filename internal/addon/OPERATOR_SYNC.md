@@ -4,6 +4,11 @@ This document describes how to update the embedded argocd-operator manifests in 
 repo when the upstream [argocd-operator](https://github.com/argoproj-labs/argocd-operator)
 releases a new version.
 
+The operator version is set by the `github.com/argoproj-labs/argocd-operator` module in
+`go.mod`. Its `api/v1beta1` package provides the Go types for the ArgoCD CR, the bundled
+operator CRDs are generated from the same module, and the operator image must be the one that
+version deploys. `make verify-operator-version` (part of `make test`) fails when they drift.
+
 ## What This Repo Embeds
 
 The argocd-operator is deployed on both hub and spoke clusters. This repo carries
@@ -34,7 +39,7 @@ addon has no equivalent "adopt existing" concept on managed clusters.
 ### What each file contains
 
 **`argocd-operator-crds.yaml`** — All CRDs from the operator (`config/crd/bases/*.yaml`),
-concatenated. As of v0.18.0 these are:
+concatenated. As of v0.19.0-rc2 these are:
 - `applications.argoproj.io`
 - `applicationsets.argoproj.io`
 - `appprojects.argoproj.io`
@@ -62,59 +67,43 @@ Typical resources include:
 
 ### Prerequisites
 
-- Access to the argocd-operator source at the target tag (clone or local copy)
-- `kustomize` installed (v4+)
+- Go. The operator source at the target tag comes from the Go module cache, so no clone is needed.
+- `kustomize` (`make kustomize` installs the pinned version into `bin/`)
 - `python3` with `PyYAML` (for resource listing/comparison)
 
-### Step 1: Generate CRDs from operator source
+### Step 1: Bump the operator Go module
 
 ```bash
-cd <argocd-operator-repo>
-git checkout <target-version-tag>  # e.g. v0.18.0
-
-# Option A (recommended): regenerate CRDs from Go types first
-# This ensures CRDs reflect the actual Go struct definitions.
-# Requires controller-gen (the operator Makefile can install it).
-make manifests
-
-# Option B: skip regeneration if you trust the tag's committed CRD bases
-# (safe for tagged releases since CI validates them)
+go get github.com/argoproj-labs/argocd-operator@<target-version-tag>  # e.g. v0.19.0-rc2
+go mod tidy
 ```
 
-Build CRDs with kustomize and strip the conversion webhook section.
-The webhook references a cluster-local cert-manager Service that won't exist
-on clusters without cert-manager, so it must be removed.
+The module must build with this repo's controller-runtime. For example, v0.18.0 does not build
+with controller-runtime v0.23 or later, because its `api/v1beta1/argocd_webhook.go` calls
+`ctrl.NewWebhookManagedBy(mgr)`.
+
+The steps below read the operator source from the module cache:
 
 ```bash
-# Build CRDs via kustomize (applies labels and ordering from kustomization.yaml)
-kustomize build config/crd > /tmp/operator-crds-raw.yaml
-
-# Remove the .spec.conversion block from all CRD documents.
-# This sed removes lines from "  conversion:" through the end of that block
-# (detected by the next sibling field at the same 2-space indent level).
-# It is version-agnostic — works regardless of what conversionReviewVersions
-# or webhook config the operator declares.
-sed '/^  conversion:$/,/^  [a-z]/{/^  [a-z]/!d; /^  conversion:$/d}' \
-    /tmp/operator-crds-raw.yaml > /tmp/operator-crds-clean.yaml
-
-# Verify no conversion sections remain
-grep -c "conversion:" /tmp/operator-crds-clean.yaml  # should output 0
+OPERATOR_DIR="$(go list -m -f '{{.Dir}}' github.com/argoproj-labs/argocd-operator)"
 ```
 
-### Step 2: Replace CRD files
+### Step 2: Regenerate the CRD files
 
 ```bash
-cd <this-repo>
-cp /tmp/operator-crds-clean.yaml charts/argocd-agent-addon/crds/argocd-operator-crds.yaml
-cp /tmp/operator-crds-clean.yaml internal/addon/charts/argocd-agent-addon/crds/argocd-operator-crds.yaml
-make sync-crds-chart
+make sync-operator-crds
 ```
+
+This builds `config/crd` of the operator module with kustomize, which applies the labels and
+ordering from its `kustomization.yaml`. It removes the `.spec.conversion` block from every CRD,
+because the webhook references a cluster-local cert-manager Service that won't exist on clusters
+without cert-manager. It writes the result to both `argocd-operator-crds.yaml` files and then
+runs `make sync-crds-chart`.
 
 ### Step 3: Generate operator deployment manifests
 
 ```bash
-cd <argocd-operator-repo>
-kustomize build config/default > /tmp/operator-full.yaml
+bin/kustomize build "$OPERATOR_DIR/config/default" > /tmp/operator-full.yaml
 ```
 
 List the non-CRD resources to understand what the new version produces:
@@ -159,7 +148,7 @@ cd <this-repo>
 
 # Quick comparison (parse embedded template, replacing Helm vars with defaults)
 python3 -c "
-import yaml, json
+import re, yaml, json
 
 with open('/tmp/operator-full.yaml') as f:
     kust_docs = list(yaml.safe_load_all(f))
@@ -170,6 +159,8 @@ for d in kust_docs:
 
 with open('internal/addon/charts/argocd-agent-addon/templates/_operator-manifests.tpl') as f:
     content = f.read()
+content = content.replace('{{- define \"argocd-operator.manifests\" -}}', '').replace('{{- end -}}', '')
+content = re.sub(r'\n *\{\{- with \.Values\.imagePullSecrets \}\}.*?\{\{- end \}\}', '', content, flags=re.S)
 content = content.replace('{{ .Values.global.argoCDOperatorNamespace }}', 'argocd-operator-system')
 content = content.replace('\"{{ .Values.operatorImage }}:{{ .Values.operatorImageTag }}\"', 'PLACEHOLDER_IMAGE')
 emb_docs = list(yaml.safe_load_all(content))
@@ -211,16 +202,21 @@ Manually update `_operator-manifests.tpl` in both chart locations to match the n
 
 3. **`app.kubernetes.io/managed-by: argocd-agent-addon`** label on the Namespace resource.
 
-4. **Image reference**: upstream uses a `@sha256:...` digest (set in
-   `config/manager/kustomization.yaml`). We use a tag-based reference controlled
-   by the Makefile's `ARGOCD_OPERATOR_IMAGE` variable.
+4. **Image reference**: upstream sets the image in `config/manager/kustomization.yaml`,
+   by digest in some versions (v0.18.0) and by tag in others (v0.19.0-rc2). We use a
+   tag-based reference controlled by the Makefile's `ARGOCD_OPERATOR_IMAGE` variable.
+
+5. **`open-cluster-management:argocd-agent:work-agent-argocd` ClusterRole**, which lets the
+   OCM work agent apply the ArgoCD CR on managed clusters. It is not part of upstream.
 
 ### Step 5: Update argocd.yaml and buildDefaultArgoCDCR (if needed)
 
 If the ArgoCD CR schema changed (new fields in `argoCDAgent`, `principal`, `agent`), update:
 - `charts/argocd-agent-addon/templates/argocd-operator/argocd.yaml` (hub/principal)
 - `internal/controller/argocd_cr_manifest_work.go`, `buildDefaultArgoCDCR` (spoke/agent,
-  generated in Go and delivered via ManifestWork - there is no spoke-side chart template for it)
+  generated in Go and delivered via ManifestWork - there is no spoke-side chart template for it).
+  It builds the CR with the operator's Go types from Step 1, so a renamed or removed field
+  fails to compile. `TestCreateArgoCDCRManifestWorkDefaultCRBytes` pins the CR it sends.
 
 ### Step 6: Verify
 
@@ -236,6 +232,9 @@ diff charts/argocd-agent-addon/crds/argocd-operator-crds.yaml \
 # Verify the standalone CRDs chart matches the hub chart
 make verify-crds-chart-sync
 
+# Verify the CRDs and the operator image match the operator version in go.mod
+make verify-operator-version
+
 # Run unit tests
 make test
 
@@ -247,7 +246,14 @@ make test-e2e-basic-pull-local
 
 ### Step 7: Update operator image tag
 
-Update the operator image version in:
+Use the image that the operator version deploys: the `newTag` in
+`$OPERATOR_DIR/config/manager/kustomization.yaml`, or the version tag when that file pins a
+digest. For v0.19.0-rc2 this is `v0.19.0`, because no `v0.19.0-rc2` image was published.
+Update it in:
 - `Makefile` — `ARGOCD_OPERATOR_IMAGE` variable
+- `Dockerfile` — `ARGOCD_OPERATOR_IMAGE` build argument default
+- `cmd/main.go` — `operatorImage` default
 - `charts/argocd-agent-addon/values.yaml` — `operatorImageTag`
 - `internal/addon/charts/argocd-agent-addon/values.yaml` — `operatorImageTag`
+
+`make verify-operator-version` checks all of them.
